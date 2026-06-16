@@ -1,0 +1,32 @@
+{
+  "name": "scl",
+  "version": "0.1.0",
+  "description": "Structured Context Layer — provider-agnostic codebase context for coding agents",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "scl": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev:api": "node --loader ts-node/esm src/api.ts",
+    "dev:mcp": "node --loader ts-node/esm src/mcp.ts",
+    "start:api": "node dist/api.js",
+    "start:mcp": "node dist/mcp.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.39.0",
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "express": "^4.18.2",
+    "tree-sitter": "^0.21.1",
+    "tree-sitter-typescript": "^0.23.2",
+    "glob": "^10.3.10",
+    "commander": "^11.1.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.10.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.2"
+  }
+}

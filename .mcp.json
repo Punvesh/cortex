@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "scl": {
+      "command": "node",
+      "args": ["C:\\SCL\\dist\\mcp.js"],
+      "env": {
+        "SCL_INDEX": "C:\\SCL\\scl-index.json"
+      }
+    }
+  }
+}

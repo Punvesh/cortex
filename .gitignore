@@ -1,0 +1,5 @@
+node_modules/
+dist/
+scl-index.json
+*.js.map
+.env
