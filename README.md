@@ -1,86 +1,57 @@
-# Cortex
+<div align="center">
 
-**Provider-agnostic structural context layer for coding agents.**
+# ◆ Cortex
 
-Cortex sits between your codebase and any coding agent (Claude Code, Continue.dev, Cursor, Copilot, etc.). Instead of every agent re-parsing and re-inferring codebase structure on every query, Cortex pre-computes it and exposes it as a queryable API and MCP server.
+**Structural context layer for coding agents.**
 
-**Result: 27× fewer input tokens. Same answer.**
+Cortex pre-computes your codebase structure so AI agents don't have to.  
+27× fewer tokens. Same answer. Any agent. Any language.
 
-```
-Codebase → cortex index → scl-index.json
-                                ↓
-            Claude Code | Continue.dev | Cursor | any MCP client
-```
+[![CI](https://github.com/Punvesh/cortex/actions/workflows/ci.yml/badge.svg)](https://github.com/Punvesh/cortex/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/cortex-code.svg)](https://www.npmjs.com/package/cortex-code)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Node](https://img.shields.io/badge/node-%3E%3D18-green.svg)](https://nodejs.org)
+
+</div>
 
 ---
 
 ## The problem
 
-When an agent reads your codebase to answer a question, it burns tokens reconstructing what's already deterministically knowable — import graphs, call chains, where functions are defined. On a real codebase that's thousands of tokens per query, just to re-infer structure that hasn't changed.
+Every time an AI agent answers a question about your code, it reads raw source files and re-infers what's already deterministic — import graphs, call chains, where functions live. On a real codebase that's **thousands of wasted tokens per query**, just to re-derive structure that hasn't changed.
 
-Cortex externalizes that reconstruction cost. Agents query resolved facts instead of raw files.
-
----
+Cortex solves this by pre-computing that structure and exposing it as a query API and MCP server. Agents ask for resolved facts instead of reading raw files.
 
 ## Benchmark
 
-Task: *"Find all callers of `buildIndex`, list what `src/cli.ts` imports, locate where `parseFile` is defined."*
+**Task:** *"Find all callers of `buildIndex`, list what `src/cli.ts` imports, locate where `parseFile` is defined."*
 
-| Approach | Input tokens | Method |
-|---|---|---|
-| Without Cortex | 6,567 | Read 6 source files |
-| With Cortex | 238 | 3 tool calls |
-| **Savings** | **96.4% / 27.6×** | Same answer |
+| | Approach | Input tokens | Method |
+|---|---|---|---|
+| ❌ | Without Cortex | **6,567** | Read 6 source files |
+| ✅ | With Cortex | **238** | 3 tool calls |
+| | **Savings** | **96.4% / 27.6×** | Same answer |
 
----
-
-## Install
+## Quickstart
 
 ```bash
-npm install -g cortex-scl   # coming soon
-# or run from source:
+# Clone and build
 git clone https://github.com/Punvesh/cortex
 cd cortex && npm install && npm run build
-```
 
----
-
-## Usage
-
-### 1. Index your codebase
-
-```bash
+# Index your project
 node dist/cli.js index /path/to/your/project
-# Done in 0.04s — 6 files, 69 functions, 269 call sites, 22 imports
-```
 
-### 2. Query from the CLI
-
-```bash
-# Who calls processPayment?
+# Query it
 node dist/cli.js query callers processPayment
-
-# What does auth/login.ts import?
 node dist/cli.js query deps src/auth/login.ts
+node dist/cli.js query search validateToken
 
-# What's exported from utils/format.ts?
-node dist/cli.js query symbols src/utils/format.ts
-
-# Where is validateToken defined?
-node dist/cli.js query functions --name validateToken
+# Open the dashboard
+node dist/cli.js dashboard
 ```
 
-### 3. Start the REST API
-
-```bash
-node dist/cli.js serve --port 7700
-# GET http://localhost:7700/callers?fn=processPayment
-# GET http://localhost:7700/deps?file=src/auth/login.ts
-# GET http://localhost:7700/symbols?file=src/utils/format.ts
-# GET http://localhost:7700/health
-```
-
-### 4. Connect via MCP (Claude Code / Continue.dev)
+## Connect to Claude Code (MCP)
 
 Add to `~/.claude/settings.json`:
 
@@ -98,63 +69,146 @@ Add to `~/.claude/settings.json`:
 }
 ```
 
-Restart Claude Code. You'll have 5 new tools:
+Restart Claude Code. You now have **8 structural tools** available in every session:
 
 | Tool | What it answers |
 |---|---|
-| `scl_callers` | Where is this function called? |
-| `scl_deps` | What does this file import / what imports it? |
-| `scl_symbols` | What's exported vs internal in this file? |
-| `scl_functions` | Where is this function defined? |
-| `scl_health` | Is the index fresh? How big is it? |
+| `cortex_callers` | Where is this function called? |
+| `cortex_deps` | What does this file import / what imports it? |
+| `cortex_symbols` | What's exported vs internal in this file? |
+| `cortex_functions` | Where is this function defined? |
+| `cortex_search` | Find any symbol across the codebase |
+| `cortex_context` | Full structural context for a file in one call |
+| `cortex_architecture` | High-level module dependency map |
+| `cortex_health` | Is the index fresh? How big is it? |
 
----
+## CLI reference
+
+```bash
+cortex init                    # Initialize .cortexrc.json in current project
+cortex index [dir]             # Build the context index
+cortex index [dir] --out <f>   # Write index to a custom path
+cortex watch [dir]             # Watch for changes and auto-reindex
+cortex serve                   # Start REST API on :7700
+cortex dashboard               # Open web UI in browser
+cortex query callers <fn>      # Find all callers of a function
+cortex query deps <file>       # Show import dependencies
+cortex query symbols <file>    # List exported / internal symbols
+cortex query search <term>     # Search functions and symbols
+```
+
+## REST API
+
+```
+GET /callers?fn=<name>
+GET /deps?file=<path>
+GET /symbols?file=<path>
+GET /functions?name=<name>&file=<path>&exported=true
+GET /search?q=<term>
+GET /context?file=<path>
+GET /architecture
+GET /health
+```
+
+## Supported languages
+
+| Language | Extensions | Status |
+|---|---|---|
+| TypeScript | `.ts` `.tsx` `.mts` `.cts` | ✅ Stable |
+| JavaScript | `.js` `.jsx` `.mjs` `.cjs` | ✅ Stable |
+| Python | `.py` `.pyw` | ✅ Stable |
+| Go | `.go` | 🔜 Planned |
+| Rust | `.rs` | 🔜 Planned |
+| Java | `.java` | 🔜 Planned |
+
+## GitHub Actions — auto-index on push
+
+Copy this into your project at `.github/workflows/cortex-index.yml`:
+
+```yaml
+name: Cortex Index
+on:
+  push:
+    branches: [main]
+
+jobs:
+  index:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20.x' }
+      - run: npx cortex-code index . --out scl-index.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cortex-index
+          path: scl-index.json
+```
+
+## Watch mode
+
+```bash
+cortex watch /path/to/project
+# ◆ cortex watch — watching /path/to/project
+# ✔ Index updated — 312 functions, 48 files  (triggered on save)
+```
+
+## How it works
+
+```
+Your codebase
+    │
+    ▼
+┌─────────────────────────────────────────────────┐
+│  Cortex Parser (Tree-sitter)                    │
+│  Extracts: functions · call sites · imports     │
+│  Languages: TypeScript · JavaScript · Python    │
+└──────────────────────┬──────────────────────────┘
+                       │
+                       ▼
+              scl-index.json
+              (flat JSON, ~50KB for 10K LOC)
+                       │
+          ┌────────────┼─────────────┐
+          ▼            ▼             ▼
+      REST API      MCP Server    CLI queries
+      :7700         stdio         cortex query
+          │            │
+          └─────┬──────┘
+                ▼
+    Claude Code · Continue.dev · Cursor · any agent
+```
+
+**Parser:** Uses [Tree-sitter](https://tree-sitter.github.io/) — the same parser used by Neovim, Zed, and GitHub. Deterministic: same code always produces the same index.
+
+**Index:** A single `scl-index.json` flat file. No database. Fast to read, easy to diff, trivial to cache.
+
+**MCP Server:** Implements the [Model Context Protocol](https://modelcontextprotocol.io/) over stdio. Works with any MCP-compatible client.
 
 ## Architecture
 
 ```
 src/
-├── types.ts     — shared types (SCLIndex, FunctionDef, CallSite, ImportEdge)
-├── parser.ts    — Tree-sitter AST walker → scl-index.json
-├── api.ts       — Express REST server
-├── mcp.ts       — MCP stdio server (5 tools)
-├── cli.ts       — scl init / index / serve / query commands
-└── index.ts     — public exports
+├── parsers/
+│   ├── types.ts       — LanguageAdapter interface
+│   ├── utils.ts       — shared AST utilities
+│   ├── typescript.ts  — TS/TSX adapter
+│   ├── javascript.ts  — JS/JSX adapter
+│   ├── python.ts      — Python adapter
+│   └── index.ts       — language router
+├── types.ts           — shared data types (SCLIndex, etc.)
+├── parser.ts          — buildIndex() orchestrator
+├── api.ts             — Express REST server
+├── mcp.ts             — MCP stdio server (8 tools)
+├── cli.ts             — CLI commands
+├── dashboard.ts       — web dashboard server
+└── index.ts           — public exports
 ```
-
-**Parser:** Uses [Tree-sitter](https://tree-sitter.github.io/) with the TypeScript grammar. Extracts function declarations, arrow functions, method definitions, call expressions, and import statements. Deterministic — same code always produces the same index.
-
-**Index:** A single `scl-index.json` flat file. Designed to be regenerated on commit (CI hook) or on demand. No database required.
-
-**MCP server:** Implements the [Model Context Protocol](https://modelcontextprotocol.io/) over stdio. Any MCP-compatible client can connect.
-
----
-
-## Supported languages
-
-- [x] TypeScript / TSX
-- [ ] JavaScript (planned)
-- [ ] Python (planned)
-- [ ] Go (planned)
-
----
-
-## Roadmap
-
-- [ ] Multi-language support (JS, Python, Go)
-- [ ] Semantic layer (naming conventions, architectural rules)
-- [ ] Git hook for automatic re-indexing on commit
-- [ ] `npm install -g cortex-scl` package
-- [ ] VS Code extension
-
----
 
 ## Contributing
 
-PRs welcome. The parser (`src/parser.ts`) is the best place to start — adding a new language means adding a new Tree-sitter grammar and a new `walk()` implementation.
-
----
+See [CONTRIBUTING.md](CONTRIBUTING.md). The fastest contribution is **adding a new language** — each language is ~80 lines implementing the `LanguageAdapter` interface.
 
 ## License
 
-MIT
+MIT © [Punvesh](https://github.com/Punvesh)
