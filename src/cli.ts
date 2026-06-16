@@ -274,6 +274,32 @@ program
     console.log(chalk.dim("\nNext: ") + chalk.cyan("cortex index") + chalk.dim(" to build your context index"));
   });
 
+// ── cortex mcp-config ─────────────────────────────────────────────────────
+program
+  .command("mcp-config")
+  .description("Print ready-to-paste MCP config for Claude Code")
+  .option("-i, --index <path>", "Path to the index file", "scl-index.json")
+  .action((opts: { index: string }) => {
+    const mcpJsPath = path.resolve(new URL(import.meta.url).pathname.replace(/^\/([A-Z]:)/, "$1"), "../../dist/mcp.js").replace(/\\/g, "/");
+    const indexPath = path.resolve(opts.index).replace(/\\/g, "/");
+    const config = {
+      mcpServers: {
+        cortex: {
+          command: "node",
+          args: [mcpJsPath],
+          env: { SCL_INDEX: indexPath },
+        },
+      },
+    };
+    console.log();
+    console.log(chalk.bold("Add this to ~/.claude/settings.json (inside the root object):"));
+    console.log();
+    console.log(JSON.stringify(config, null, 2));
+    console.log();
+    console.log(chalk.dim("Or for project-only scope, add to .mcp.json in your project root."));
+    console.log();
+  });
+
 // ── helpers ───────────────────────────────────────────────────────────────
 function load(indexPath: string): SCLIndex {
   const resolved = path.resolve(indexPath);
