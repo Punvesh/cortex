@@ -4,14 +4,15 @@ import { z } from "zod";
 import fs from "fs";
 import path from "path";
 import type { SCLIndex } from "./types.js";
+import { analyzeImpact, findPath, findCycles, findCriticalNodes, buildImportGraph } from "./graph.js";
+import { analyzeGitImpact, isGitRepo } from "./git.js";
+import { recordCall, summarize } from "./analytics.js";
 
 const DEFAULT_INDEX = path.resolve("scl-index.json");
 
 function loadIndex(): SCLIndex {
   const indexPath = process.env.SCL_INDEX ?? DEFAULT_INDEX;
-  if (!fs.existsSync(indexPath)) {
-    throw new Error(`Cortex index not found at ${indexPath}. Run: cortex index`);
-  }
+  if (!fs.existsSync(indexPath)) throw new Error(`Cortex index not found at ${indexPath}. Run: cortex index`);
   return JSON.parse(fs.readFileSync(indexPath, "utf8")) as SCLIndex;
 }
 
@@ -20,215 +21,228 @@ function resolveImport(from: string, to: string): string {
   return path.join(path.dirname(from), to).replace(/\\/g, "/");
 }
 
-const server = new McpServer({ name: "cortex", version: "0.2.0" });
+function j(obj: unknown): string { return JSON.stringify(obj, null, 2); }
 
-// ── Tool 1: callers ──────────────────────────────────────────────────────
-server.tool(
-  "cortex_callers",
-  "Find all locations in the codebase that call a specific function. Returns caller name, file path, and line number.",
-  { fn: z.string().describe("Function name to find call sites for") },
-  async ({ fn }) => {
+// Wrap handler with timing + analytics
+function track<T>(tool: string, fn: () => Promise<T>): Promise<T> {
+  const start = Date.now();
+  return fn().finally(() => recordCall(tool, Date.now() - start));
+}
+
+const server = new McpServer({ name: "cortex", version: "0.3.0" });
+
+// ── 1. cortex_callers ────────────────────────────────────────────────────
+server.tool("cortex_callers",
+  "Find every location in the codebase that calls a specific function. Returns caller name, file, and line number. Handles method calls (obj.method).",
+  { fn: z.string().describe("Function name to find callers of") },
+  ({ fn }) => track("cortex_callers", async () => {
     const index = loadIndex();
     const sites = index.callSites.filter(c => c.callee === fn || c.callee.endsWith(`.${fn}`));
-    return { content: [{ type: "text", text: JSON.stringify({ fn, count: sites.length, callers: sites.map(s => ({ caller: s.caller, file: s.file, line: s.line })) }, null, 2) }] };
-  }
+    return { content: [{ type: "text" as const, text: j({ fn, count: sites.length, callers: sites.map(s => ({ caller: s.caller, file: s.file, line: s.line, dynamic: s.dynamic })) }) }] };
+  })
 );
 
-// ── Tool 2: deps ─────────────────────────────────────────────────────────
-server.tool(
-  "cortex_deps",
-  "Get the import dependency graph for a file — what it imports and what files import it.",
+// ── 2. cortex_deps ───────────────────────────────────────────────────────
+server.tool("cortex_deps",
+  "Get the import dependency graph for a file — what it imports and what files import it. Includes aliased imports and re-exports.",
   { file: z.string().describe("Relative file path (e.g. src/auth/login.ts)") },
-  async ({ file }) => {
+  ({ file }) => track("cortex_deps", async () => {
     const index = loadIndex();
     const imports = index.imports.filter(i => i.from === file);
     const importedBy = index.imports.filter(i => {
-      const resolved = resolveImport(i.from, i.to);
-      return resolved === file || resolved === file.replace(/\.(ts|tsx|js|jsx|py)$/, "");
+      const r = resolveImport(i.from, i.to);
+      return r === file || r === file.replace(/\.(ts|tsx|js|jsx|py)$/, "");
     });
-    return { content: [{ type: "text", text: JSON.stringify({ file, imports: imports.map(i => ({ module: i.to, symbols: i.symbols })), importedBy: importedBy.map(i => ({ file: i.from, symbols: i.symbols })) }, null, 2) }] };
-  }
+    return { content: [{ type: "text" as const, text: j({ file, imports: imports.map(i => ({ module: i.to, symbols: i.symbols, aliases: i.aliases, reExport: i.reExport })), importedBy: importedBy.map(i => ({ file: i.from, symbols: i.symbols })) }) }] };
+  })
 );
 
-// ── Tool 3: symbols ───────────────────────────────────────────────────────
-server.tool(
-  "cortex_symbols",
-  "List exported (public API) and internal symbols declared in a file.",
-  { file: z.string().describe("Relative file path (e.g. src/utils/format.ts)") },
-  async ({ file }) => {
+// ── 3. cortex_symbols ────────────────────────────────────────────────────
+server.tool("cortex_symbols",
+  "List exported (public API) and internal symbols in a file. Includes re-export information for barrel files.",
+  { file: z.string().describe("Relative file path") },
+  ({ file }) => track("cortex_symbols", async () => {
     const index = loadIndex();
     const entry = index.symbols.find(s => s.file === file);
-    if (!entry) return { content: [{ type: "text", text: `No symbols found for ${file}` }], isError: true };
-    return { content: [{ type: "text", text: JSON.stringify(entry, null, 2) }] };
-  }
+    if (!entry) return { content: [{ type: "text" as const, text: `No symbols for ${file}` }], isError: true };
+    return { content: [{ type: "text" as const, text: j(entry) }] };
+  })
 );
 
-// ── Tool 4: functions ─────────────────────────────────────────────────────
-server.tool(
-  "cortex_functions",
-  "Find where a function is defined. Filter by name, file, or whether it is exported.",
-  {
-    name: z.string().optional().describe("Function name to search for"),
-    file: z.string().optional().describe("Filter to a specific file"),
-    exported: z.boolean().optional().describe("If true, return only exported functions"),
-  },
-  async ({ name, file, exported }) => {
+// ── 4. cortex_functions ──────────────────────────────────────────────────
+server.tool("cortex_functions",
+  "Find where a function is defined. Filter by name, file, or export status. Returns file, line, async flag, and decorators.",
+  { name: z.string().optional(), file: z.string().optional(), exported: z.boolean().optional() },
+  ({ name, file, exported }) => track("cortex_functions", async () => {
     const index = loadIndex();
     let fns = index.functions;
     if (name) fns = fns.filter(f => f.name === name || f.name.endsWith(`.${name}`));
     if (file) fns = fns.filter(f => f.file === file);
     if (exported !== undefined) fns = fns.filter(f => f.exported === exported);
-    return { content: [{ type: "text", text: JSON.stringify({ count: fns.length, functions: fns }, null, 2) }] };
-  }
+    return { content: [{ type: "text" as const, text: j({ count: fns.length, functions: fns }) }] };
+  })
 );
 
-// ── Tool 5: search ────────────────────────────────────────────────────────
-server.tool(
-  "cortex_search",
-  "Search for any symbol (function, import, export) by name across the entire codebase. Supports partial matches.",
-  {
-    query: z.string().describe("Symbol name or partial name to search for"),
-    kind: z.enum(["function", "import", "export", "all"]).optional().default("all").describe("What to search: function definitions, imports, exports, or all"),
-  },
-  async ({ query, kind }) => {
+// ── 5. cortex_search ─────────────────────────────────────────────────────
+server.tool("cortex_search",
+  "Search for any symbol, function, import, or export across the entire codebase. Supports partial name matches.",
+  { query: z.string(), kind: z.enum(["function", "import", "export", "all"]).optional().default("all") },
+  ({ query, kind }) => track("cortex_search", async () => {
     const index = loadIndex();
     const q = query.toLowerCase();
     const results: Record<string, unknown[]> = {};
-
-    if (kind === "function" || kind === "all") {
-      results.functions = index.functions
-        .filter(f => f.name.toLowerCase().includes(q))
-        .slice(0, 20)
-        .map(f => ({ name: f.name, file: f.file, line: f.line, exported: f.exported }));
-    }
-    if (kind === "export" || kind === "all") {
-      results.exports = index.symbols
-        .flatMap(s => s.exported.filter(e => e.toLowerCase().includes(q)).map(e => ({ symbol: e, file: s.file })))
-        .slice(0, 20);
-    }
-    if (kind === "import" || kind === "all") {
-      results.imports = index.imports
-        .filter(i => i.to.toLowerCase().includes(q) || i.symbols.some(s => s.toLowerCase().includes(q)))
-        .slice(0, 20)
-        .map(i => ({ from: i.from, module: i.to, symbols: i.symbols }));
-    }
-
-    const total = Object.values(results).reduce((s, v) => s + v.length, 0);
-    return { content: [{ type: "text", text: JSON.stringify({ query, total, results }, null, 2) }] };
-  }
+    if (kind === "function" || kind === "all")
+      results.functions = index.functions.filter(f => f.name.toLowerCase().includes(q)).slice(0, 20);
+    if (kind === "export" || kind === "all")
+      results.exports = index.symbols.flatMap(s => s.exported.filter(e => e.toLowerCase().includes(q)).map(e => ({ symbol: e, file: s.file }))).slice(0, 20);
+    if (kind === "import" || kind === "all")
+      results.imports = index.imports.filter(i => i.to.toLowerCase().includes(q) || i.symbols.some(s => s.toLowerCase().includes(q))).slice(0, 20);
+    return { content: [{ type: "text" as const, text: j({ query, total: Object.values(results).reduce((s, v) => s + v.length, 0), results }) }] };
+  })
 );
 
-// ── Tool 6: context ───────────────────────────────────────────────────────
-server.tool(
-  "cortex_context",
-  "Get complete structural context for a file in one call: its symbols, imports, what imports it, and call sites for all its exported functions. The single best tool when you need to understand a file.",
-  { file: z.string().describe("Relative file path") },
-  async ({ file }) => {
+// ── 6. cortex_context ────────────────────────────────────────────────────
+server.tool("cortex_context",
+  "Get complete structural context for a file in one call: symbols, imports, importers, functions, callers of exported functions. Use this first when exploring an unfamiliar file.",
+  { file: z.string() },
+  ({ file }) => track("cortex_context", async () => {
     const index = loadIndex();
     const symbols = index.symbols.find(s => s.file === file);
     const imports = index.imports.filter(i => i.from === file);
-    const importedBy = index.imports.filter(i => {
-      const resolved = resolveImport(i.from, i.to);
-      return resolved === file || resolved === file.replace(/\.(ts|tsx|js|jsx|py)$/, "");
-    });
+    const importedBy = index.imports.filter(i => { const r = resolveImport(i.from, i.to); return r === file || r === file.replace(/\.(ts|tsx|js|jsx|py)$/, ""); });
     const functions = index.functions.filter(f => f.file === file);
     const exportedFns = functions.filter(f => f.exported).map(f => f.name);
     const callers = index.callSites.filter(c => exportedFns.some(fn => c.callee === fn || c.callee.endsWith(`.${fn}`)));
-
-    return {
-      content: [{
-        type: "text", text: JSON.stringify({
-          file,
-          symbols: symbols ?? { exported: [], internal: [] },
-          imports: imports.map(i => ({ module: i.to, symbols: i.symbols })),
-          importedBy: importedBy.map(i => ({ file: i.from, symbols: i.symbols })),
-          functions: functions.map(f => ({ name: f.name, line: f.line, exported: f.exported })),
-          callersOfExports: callers.map(c => ({ callee: c.callee, caller: c.caller, file: c.file, line: c.line })),
-        }, null, 2)
-      }]
-    };
-  }
+    return { content: [{ type: "text" as const, text: j({ file, symbols: symbols ?? { exported: [], internal: [] }, imports: imports.map(i => ({ module: i.to, symbols: i.symbols, reExport: i.reExport })), importedBy: importedBy.map(i => ({ file: i.from, symbols: i.symbols })), functions: functions.map(f => ({ name: f.name, line: f.line, exported: f.exported, async: f.async })), callersOfExports: callers.map(c => ({ callee: c.callee, caller: c.caller, file: c.file, line: c.line })) }) }] };
+  })
 );
 
-// ── Tool 7: architecture ──────────────────────────────────────────────────
-server.tool(
-  "cortex_architecture",
-  "Get the high-level module dependency map of the codebase. Shows which files import which, giving an architectural overview without reading any source code.",
-  {
-    depth: z.number().optional().default(1).describe("How many import hops to follow from each file (1 = direct deps only)"),
-    file: z.string().optional().describe("If set, show dependency graph starting from this file"),
-  },
-  async ({ depth, file }) => {
+// ── 7. cortex_impact ─────────────────────────────────────────────────────
+server.tool("cortex_impact",
+  "Refactor impact analysis: given a function name, returns all direct callers, transitively affected files, affected test files, and affected exports. Answers: 'If I change this, what could break?'",
+  { symbol: z.string().describe("Function or symbol name to analyse"), depth: z.number().optional().default(5).describe("Max transitive depth (default 5)") },
+  ({ symbol, depth }) => track("cortex_impact", async () => {
     const index = loadIndex();
+    const result = analyzeImpact(index, symbol, depth);
+    return { content: [{ type: "text" as const, text: j(result) }] };
+  })
+);
 
+// ── 8. cortex_path ───────────────────────────────────────────────────────
+server.tool("cortex_path",
+  "Find the shortest dependency path between two files or modules. Shows how 'from' reaches 'to' through the import graph.",
+  { from: z.string().describe("Starting file (relative path)"), to: z.string().describe("Target file (relative path)") },
+  ({ from, to }) => track("cortex_path", async () => {
+    const index = loadIndex();
+    return { content: [{ type: "text" as const, text: j(findPath(index, from, to)) }] };
+  })
+);
+
+// ── 9. cortex_cycles ─────────────────────────────────────────────────────
+server.tool("cortex_cycles",
+  "Detect circular dependencies in the codebase. Returns all import cycles with their file paths.",
+  {},
+  () => track("cortex_cycles", async () => {
+    const index = loadIndex();
+    const cycles = findCycles(index);
+    return { content: [{ type: "text" as const, text: j({ count: cycles.length, cycles }) }] };
+  })
+);
+
+// ── 10. cortex_repo_map ──────────────────────────────────────────────────
+server.tool("cortex_repo_map",
+  "Generate a structured map of the repository: how files are grouped into modules, what each module exports, and how modules depend on each other. Essential for onboarding to an unfamiliar codebase.",
+  {},
+  () => track("cortex_repo_map", async () => {
+    const index = loadIndex();
+    const graph = buildImportGraph(index);
+    const critical = findCriticalNodes(index, 5);
+
+    // Group files by top-level directory
+    const modules: Record<string, { files: string[]; exports: string[]; imports: string[] }> = {};
+    for (const sym of index.symbols) {
+      const dir = sym.file.split("/")[0] ?? ".";
+      if (!modules[dir]) modules[dir] = { files: [], exports: [], imports: [] };
+      modules[dir].files.push(sym.file);
+      modules[dir].exports.push(...sym.exported.map(e => `${sym.file.split("/").pop()}:${e}`));
+    }
+    // Cross-module imports
+    for (const imp of index.imports) {
+      const fromDir = imp.from.split("/")[0];
+      const toDir = imp.to.startsWith(".") ? resolveImport(imp.from, imp.to).split("/")[0] : imp.to.split("/")[0];
+      if (fromDir !== toDir && modules[fromDir] && !modules[fromDir].imports.includes(toDir)) {
+        modules[fromDir].imports.push(toDir);
+      }
+    }
+
+    return { content: [{ type: "text" as const, text: j({ modules, criticalFiles: critical, totalFiles: index.symbols.length }) }] };
+  })
+);
+
+// ── 11. cortex_git_impact ────────────────────────────────────────────────
+server.tool("cortex_git_impact",
+  "Show the structural impact of changes since a git ref (branch, commit, or tag). Returns changed files, transitively affected files, and at-risk tests.",
+  { ref: z.string().describe("Git ref to compare against (e.g. main, HEAD~3, v1.0.0)") },
+  ({ ref }) => track("cortex_git_impact", async () => {
+    const index = loadIndex();
+    const root = index.root;
+    if (!isGitRepo(root)) return { content: [{ type: "text" as const, text: "Not a git repository" }], isError: true };
+    return { content: [{ type: "text" as const, text: j(analyzeGitImpact(index, root, ref)) }] };
+  })
+);
+
+// ── 12. cortex_architecture ──────────────────────────────────────────────
+server.tool("cortex_architecture",
+  "Get the high-level module dependency map. Shows which directories import which, with critical node highlighting.",
+  { file: z.string().optional(), depth: z.number().optional().default(1) },
+  ({ file, depth }) => track("cortex_architecture", async () => {
+    const index = loadIndex();
     if (file) {
-      // Fan-out from a specific file
       const seen = new Set<string>();
-      const graph: Record<string, string[]> = {};
-
+      const graphOut: Record<string, string[]> = {};
       function expand(f: string, d: number) {
         if (seen.has(f) || d === 0) return;
         seen.add(f);
         const deps = index.imports.filter(i => i.from === f).map(i => i.to);
-        graph[f] = deps;
+        graphOut[f] = deps;
         if (d > 1) deps.forEach(dep => expand(dep, d - 1));
       }
       expand(file, depth);
-      return { content: [{ type: "text", text: JSON.stringify({ root: file, depth, graph }, null, 2) }] };
+      return { content: [{ type: "text" as const, text: j({ root: file, depth, graph: graphOut }) }] };
     }
-
-    // Global module map — group by directory
     const dirMap: Record<string, { imports: string[]; importedBy: string[] }> = {};
-
     for (const imp of index.imports) {
       const fromDir = path.dirname(imp.from);
       const toDir = imp.to.startsWith(".") ? path.dirname(resolveImport(imp.from, imp.to)) : imp.to.split("/")[0];
-      if (fromDir === toDir) continue; // skip intra-module
-
+      if (fromDir === toDir) continue;
       if (!dirMap[fromDir]) dirMap[fromDir] = { imports: [], importedBy: [] };
       if (!dirMap[fromDir].imports.includes(toDir)) dirMap[fromDir].imports.push(toDir);
-
       if (!dirMap[toDir]) dirMap[toDir] = { imports: [], importedBy: [] };
       if (!dirMap[toDir].importedBy.includes(fromDir)) dirMap[toDir].importedBy.push(fromDir);
     }
-
-    return {
-      content: [{
-        type: "text", text: JSON.stringify({
-          modules: Object.keys(dirMap).length,
-          map: dirMap
-        }, null, 2)
-      }]
-    };
-  }
+    return { content: [{ type: "text" as const, text: j({ modules: Object.keys(dirMap).length, map: dirMap }) }] };
+  })
 );
 
-// ── Tool 8: health ────────────────────────────────────────────────────────
-server.tool(
-  "cortex_health",
-  "Check Cortex index status — when it was last built, what project it covers, and index size.",
+// ── 13. cortex_health ────────────────────────────────────────────────────
+server.tool("cortex_health",
+  "Check index status and cumulative usage analytics: tokens avoided, queries served, estimated cost savings.",
   {},
-  async () => {
+  () => track("cortex_health", async () => {
     try {
       const index = loadIndex();
-      return {
-        content: [{
-          type: "text", text: JSON.stringify({
-            ok: true, root: index.root, generatedAt: index.generatedAt,
-            stats: { files: index.symbols.length, functions: index.functions.length, callSites: index.callSites.length, imports: index.imports.length },
-          }, null, 2)
-        }]
-      };
+      const analytics = summarize();
+      return { content: [{ type: "text" as const, text: j({ ok: true, root: index.root, generatedAt: index.generatedAt, stats: { files: index.symbols.length, functions: index.functions.length, callSites: index.callSites.length, imports: index.imports.length }, analytics }) }] };
     } catch (err) {
-      return { content: [{ type: "text", text: (err as Error).message }], isError: true };
+      return { content: [{ type: "text" as const, text: (err as Error).message }], isError: true };
     }
-  }
+  })
 );
 
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("[cortex] MCP server running on stdio — 8 tools available");
+  console.error("[cortex] MCP server running — 13 tools available");
 }
 
 main().catch(err => { console.error("[cortex] Fatal:", err); process.exit(1); });

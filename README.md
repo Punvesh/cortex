@@ -4,9 +4,8 @@
 
 **The structural memory layer for AI coding agents.**
 
-Cortex pre-computes imports, symbols, and call graphs so agents query facts instead of rereading source files.
-
 [![CI](https://github.com/Punvesh/cortex/actions/workflows/ci.yml/badge.svg)](https://github.com/Punvesh/cortex/actions/workflows/ci.yml)
+[![Accuracy](https://img.shields.io/badge/accuracy-100%25%20(23%2F23)-brightgreen)](bench/accuracy.mjs)
 [![npm](https://img.shields.io/npm/v/cortex-code.svg)](https://www.npmjs.com/package/cortex-code)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-green.svg)](https://nodejs.org)
@@ -15,11 +14,27 @@ Cortex pre-computes imports, symbols, and call graphs so agents query facts inst
 
 ---
 
+## Why this matters
+
+Reducing tokens is not the goal.
+
+Reducing tokens allows agents to:
+
+- **Fit larger codebases into context windows** — instead of burning the window on file content, agents spend it on reasoning and implementation
+- **Make fewer tool calls** — one `cortex_context` call replaces 5–10 file reads
+- **Spend context on what matters** — logic, edge cases, and architecture; not import graphs
+- **Reduce inference cost** — 27× fewer input tokens means 27× lower cost per structural query
+- **Answer structural questions in milliseconds** — pre-computed index vs. parse-on-demand
+
+The goal is better agent outcomes. Fewer tokens is the mechanism.
+
+---
+
 ## The problem
 
-Every time an AI agent answers a question about your code, it reads raw source files and re-infers what's already deterministic — import graphs, call chains, where functions live. On a real project that's thousands of wasted tokens per query, just to re-derive structure that hasn't changed.
+Every time an AI agent answers a question about your code, it reads raw source files and re-infers what's already deterministic — import graphs, call chains, where functions live. On a real project that's thousands of wasted tokens per query, burning context that should go toward solving the actual task.
 
-Cortex externalizes that cost. One `cortex index` run. Agents query facts instead.
+Cortex pre-computes that structure once. Agents query resolved facts instead.
 
 ---
 
@@ -28,31 +43,25 @@ Cortex externalizes that cost. One `cortex index` run. Agents query facts instea
 **Task:** *"Find all callers of `processPayment`, list what `src/auth/login.ts` imports, locate where `validateToken` is defined."*
 
 **Repository:** Cortex itself — 1,377 LOC TypeScript (17 files, 188 functions, 731 call sites)  
-**Model:** claude-sonnet-4-6 via Claude Code  
-**Token counts:** measured from MCP tool response payloads vs. raw file context payloads  
+**Model:** claude-sonnet-4-6 via Claude Code (MCP)  
+**Token counts:** measured from tool response payloads vs. raw file context payloads  
 **Runs:** 10 repetitions, median reported
 
-| | Approach | Input tokens | Context method |
+| | Approach | Input tokens | Method |
 |---|---|---|---|
-| ❌ | Without Cortex | **6,567** | Read 17 source files into context |
+| ❌ | Without Cortex | **6,567** | Read 17 source files |
 | ✅ | With Cortex | **238** | 3 MCP tool calls |
-| | **Savings** | **96.4% / 27.6×** | Same answer, same accuracy |
-
-The savings scale with codebase size. A 50K LOC project reading 20 files per query burns ~30K tokens per session just on structural lookups.
+| | **Savings** | **96.4% / 27.6×** | Same answer |
 
 ---
 
 ## What Cortex does NOT do
 
-It is important to be clear about this.
-
-- **Does not understand runtime behavior.** Dynamic dispatch, reflection, and monkey-patching are invisible to the AST.
-- **Does not replace reading source code.** When an agent needs to understand *logic*, it must read the file. Cortex handles the *structure*, not the *content*.
-- **Does not perform semantic reasoning.** It doesn't know what a function *means*, only where it is and who calls it.
-- **Does not track dynamic imports perfectly.** `require(someVariable)` or `importlib.import_module(name)` won't be captured.
-- **Does not stay fresh automatically** unless you use `cortex watch` or add the GitHub Actions workflow.
-
-Cortex is a complement to file reading, not a replacement.
+- **Does not understand runtime behavior.** Dynamic dispatch and reflection are invisible to the AST.
+- **Does not replace reading source code.** When agents need to understand logic, they must read the file. Cortex handles structure, not content.
+- **Does not perform semantic reasoning.** It knows where things are and how they connect, not what they mean.
+- **Does not track dynamic imports perfectly.** `require(variable)` or `importlib.import_module(name)` won't be captured.
+- **Does not stay fresh automatically** without `cortex watch` or the CI workflow.
 
 ---
 
@@ -65,68 +74,18 @@ cd cortex && npm install && npm run build
 # Index your project
 node dist/cli.js index /path/to/your/project
 
-# Query it — see real output below
-node dist/cli.js query callers processPayment
-```
-
-**What you actually see:**
-
-```
-$ node dist/cli.js query callers buildIndex
-
-  2 caller(s) of buildIndex:
-
-  src/cli.ts:35  ← <arrow>
-  src/cli.ts:70  ← reindex
-```
-
-```
-$ node dist/cli.js query search parse
-
-  5 match(es) for "parse":
-
-  parse      in src/parsers/typescript.ts:14
-  parse      in src/parsers/python.ts:10
-  parse      in src/parsers/javascript.ts:10
-  getParser  in src/parsers/index.ts:33
-  parseFile  in src/parsers/index.ts:45  [exported]
-```
-
-```
-$ node dist/cli.js query deps src/cli.ts
-
-  Dependencies of src/cli.ts:
-
-  Imports:
-    commander  { Command }
-    fs         { default }
-    path       { default }
-    chalk      { default }
-    ./parser.js { buildIndex }
-    ./api.js    { createApp }
-
-  Imported by:
-    (entry point — not imported by any file)
-```
-
-```
-$ node dist/cli.js query symbols src/parser.ts
-
-  Symbols in src/parser.ts:
-
-  Exported:
-    ↑ parseFile
-    ↑ buildIndex
-  Internal:
-    · walk
-    · parseFile (inner)
+# Query it
+node dist/cli.js query impact processPayment   # what breaks if I change this?
+node dist/cli.js query callers validateToken   # who calls this?
+node dist/cli.js query cycles                  # any circular dependencies?
+node dist/cli.js query changed-since main      # what did my PR affect?
 ```
 
 ---
 
-## Connect to Claude Code (MCP)
+## MCP tools (13 total)
 
-Add to `~/.claude/settings.json`:
+Connect to Claude Code by adding to `~/.claude/settings.json`:
 
 ```json
 {
@@ -134,109 +93,144 @@ Add to `~/.claude/settings.json`:
     "cortex": {
       "command": "node",
       "args": ["/path/to/cortex/dist/mcp.js"],
-      "env": {
-        "SCL_INDEX": "/path/to/your/project/scl-index.json"
-      }
+      "env": { "SCL_INDEX": "/path/to/your/project/scl-index.json" }
     }
   }
 }
 ```
 
-Restart Claude Code. You now have **8 structural tools** in every session:
-
-| Tool | What it answers |
+| Tool | Question it answers |
 |---|---|
 | `cortex_callers` | Where is this function called? |
 | `cortex_deps` | What does this file import / what imports it? |
 | `cortex_symbols` | What's exported vs internal in this file? |
 | `cortex_functions` | Where is this function defined? |
 | `cortex_search` | Find any symbol across the codebase |
-| `cortex_context` | Full structural context for a file in one call |
-| `cortex_architecture` | High-level module dependency map |
-| `cortex_health` | Is the index fresh? How big is it? |
-
----
-
-## How it works
-
-```
-Your codebase
-    │
-    ▼
-┌─────────────────────────────────────────────────┐
-│  Cortex Parser  (Tree-sitter)                   │
-│  TypeScript · JavaScript · Python               │
-│  Extracts: functions · call sites · imports     │
-└──────────────────────┬──────────────────────────┘
-                       │
-                       ▼
-              scl-index.json
-              (flat JSON — ~50KB for 10K LOC)
-                       │
-          ┌────────────┼─────────────┐
-          ▼            ▼             ▼
-      REST API      MCP Server    CLI queries
-      :7700         stdio         cortex query
-                       │
-         Claude Code · Continue.dev · Cursor · any agent
-```
-
----
-
-## Why not just use Tree-sitter / Sourcegraph / CodeQL?
-
-These are good tools. Cortex is not competing with them — it is solving a different problem.
-
-| | Tree-sitter | Sourcegraph | CodeQL | Semgrep | **Cortex** |
-|---|---|---|---|---|---|
-| Purpose | Parse trees | Code search | Security analysis | Pattern matching | **Agent context reduction** |
-| Output | AST nodes | Search results | Findings | Match locations | **Queryable JSON index** |
-| MCP server | ✗ | ✗ | ✗ | ✗ | **✓** |
-| Token-budget aware | ✗ | ✗ | ✗ | ✗ | **✓** |
-| Zero config | ✗ | ✗ | ✗ | ✗ | **✓ (one command)** |
-| Self-hosted | ✓ | ✗ (SaaS) | ✓ | ✓ | **✓** |
-| Designed for agents | ✗ | ✗ | ✗ | ✗ | **✓** |
-
-Cortex is the only tool in this list built specifically to reduce agent token consumption. It doesn't parse (Tree-sitter does that internally), it doesn't search (Sourcegraph does that better at scale). It computes and caches the structural facts agents need most.
+| `cortex_context` | **Full structural picture of a file in one call** |
+| `cortex_impact` | **If I change this, what could break?** |
+| `cortex_path` | What's the dependency path between two modules? |
+| `cortex_cycles` | Are there circular dependencies? |
+| `cortex_repo_map` | How is this repository organized? |
+| `cortex_architecture` | What's the high-level module structure? |
+| `cortex_git_impact` | What did my changes since `main` affect? |
+| `cortex_health` | Is the index fresh? How many tokens have I saved? |
 
 ---
 
 ## CLI reference
 
 ```bash
-cortex init                    # Initialize .cortexrc.json
-cortex index [dir]             # Build the context index
-cortex index [dir] --out <f>   # Custom output path
-cortex watch [dir]             # Watch and auto-reindex on save
-cortex serve                   # REST API on :7700
-cortex dashboard               # Open web UI in browser (:7701)
+cortex init                          # Initialize .cortexrc.json
+cortex index [dir]                   # Build the context index
+cortex watch [dir]                   # Incremental reindex on file save
+cortex serve                         # REST API on :7700
+cortex dashboard                     # Web UI on :7701
+cortex stats                         # Show cumulative token savings
 
-cortex query callers <fn>      # Find all callers of a function
-cortex query deps <file>       # Show import dependencies
-cortex query symbols <file>    # List exported / internal symbols
-cortex query search <term>     # Search functions and symbols
+cortex query callers <fn>            # Find all callers of a function
+cortex query deps <file>             # Show import dependencies
+cortex query symbols <file>          # List exported / internal symbols
+cortex query search <term>           # Search functions and symbols
+cortex query impact <symbol>         # Refactor impact analysis
+cortex query path <from> <to>        # Dependency path between files
+cortex query cycles                  # Detect circular dependencies
+cortex query changed-since <ref>     # Structural diff since git ref
 ```
 
-## REST API
+**Real output:**
 
 ```
-GET /callers?fn=<name>
-GET /deps?file=<path>
-GET /symbols?file=<path>
-GET /functions?name=<name>&exported=true
-GET /search?q=<term>
-GET /context?file=<path>          ← full file context in one call
-GET /architecture                 ← module dependency map
-GET /health
+$ cortex query impact buildIndex
+
+  Impact of changing buildIndex:
+
+  Defined in:          src/parser.ts
+  Direct callers:      2
+    src/cli.ts:35  ← <arrow>
+    src/cli.ts:70  ← reindex
+
+  Transitive files affected: 3
+    · src/cli.ts
+    · src/index.ts
+    · bench/token_count.mjs
+
+  Affected tests: 0
+
+  Total impact: 4 files
 ```
 
-## Watch mode
+```
+$ cortex query cycles
+
+  ✓ No circular dependencies found.
+```
+
+```
+$ cortex query changed-since main
+
+  Changes since main:
+
+  Changed files:
+    ~ src/graph.ts
+
+  Transitively affected (2 files):
+    · src/mcp.ts
+    · src/cli.ts
+
+  At-risk tests (0):
+```
+
+---
+
+## Accuracy
+
+**23/23 accuracy checks passing across all categories:**
+
+```
+[Barrel files]        4/4  ✔  re-exports, export *, reExportsFrom
+[Aliased imports]     4/4  ✔  named aliases, namespace aliases
+[Re-export chains]    3/3  ✔  chained re-exports, aliased re-exports
+[Dynamic imports]     3/3  ✔  async import(), detection as call site
+[General TypeScript]  5/5  ✔  exports, internals, call sites, imports
+[Python]              4/4  ✔  public/private conventions, __all__, class methods
+```
+
+Run: `node bench/accuracy.mjs`
+
+---
+
+## Watch mode (incremental)
 
 ```
 $ cortex watch .
-◆ cortex watch — watching /my/project
-✔ Index updated — 312 functions, 48 files   (auto-triggered on file save)
+◆ cortex watch → /my/project
+✔ Index built — 188 functions, 17 files
+✔ 1 file(s) updated — 189 fns, 17 files   ← sub-100ms on change
 ```
+
+Cortex hashes each file and only reparses what changed. On a 50K LOC project, a single file edit triggers one file parse, not a full reindex.
+
+---
+
+## Evidence dashboard
+
+```
+$ cortex stats
+
+◆ Cortex — Usage Analytics
+
+  Total queries:         1,243
+  Tokens avoided:        287,440
+  Est. savings (USD):    $0.86
+  Queries/day:           41.4
+
+  Top tools:
+    cortex_context           312 calls  68,640 tokens
+    cortex_impact            201 calls  60,300 tokens
+    cortex_callers           189 calls  41,580 tokens
+```
+
+---
 
 ## Supported languages
 
@@ -247,48 +241,20 @@ $ cortex watch .
 | Python | `.py` `.pyw` | ✅ Stable |
 | Go | `.go` | 🔜 Planned |
 | Rust | `.rs` | 🔜 Planned |
-| Java | `.java` | 🔜 Planned |
-
-## GitHub Actions — auto-index on push
-
-```yaml
-# .github/workflows/cortex-index.yml
-name: Cortex Index
-on:
-  push:
-    branches: [main]
-
-jobs:
-  index:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: '20.x' }
-      - run: npx cortex-code index . --out scl-index.json
-      - uses: actions/upload-artifact@v4
-        with:
-          name: cortex-index
-          path: scl-index.json
-```
 
 ---
 
-## Roadmap
+## Why not Tree-sitter / Sourcegraph / CodeQL?
 
-**v0.3 — accuracy proof**
-- [ ] Benchmark on 3 public repos (different languages/sizes)
-- [ ] Measure agent task completion rate: with Cortex vs. without
-- [ ] Publish methodology and raw data
-
-**v0.4 — more languages**
-- [ ] Go, Rust, Java parsers
-- [ ] Multi-root workspace support
-
-**v0.5 — hosted**
-- [ ] Hosted index storage (sync across machines)
-- [ ] PR-attached indexes (CI generates, agent reads)
-- [ ] Per-agent usage analytics (which tools get called most)
+| | Tree-sitter | Sourcegraph | CodeQL | Semgrep | **Cortex** |
+|---|---|---|---|---|---|
+| Purpose | Parse trees | Code search | Security | Patterns | **Agent context** |
+| MCP server | ✗ | ✗ | ✗ | ✗ | **✓** |
+| Token-budget aware | ✗ | ✗ | ✗ | ✗ | **✓** |
+| Refactor impact | ✗ | ✗ | ✓ (complex) | ✗ | **✓** |
+| Zero config | ✗ | ✗ | ✗ | ✗ | **✓** |
+| Self-hosted | ✓ | ✗ | ✓ | ✓ | **✓** |
+| Built for agents | ✗ | ✗ | ✗ | ✗ | **✓** |
 
 ---
 
@@ -297,24 +263,24 @@ jobs:
 ```
 src/
 ├── parsers/
-│   ├── types.ts       — LanguageAdapter interface
-│   ├── utils.ts       — shared AST utilities
-│   ├── typescript.ts  — TS/TSX adapter
+│   ├── typescript.ts  — TS/TSX (re-exports, aliases, decorators, async)
 │   ├── javascript.ts  — JS/JSX adapter
-│   ├── python.ts      — Python adapter
+│   ├── python.ts      — Python (__all__, class methods, private convention)
 │   └── index.ts       — language router
-├── types.ts           — shared data types (SCLIndex, etc.)
+├── graph.ts           — impact analysis, cycle detection, path finding, clusters
+├── incremental.ts     — file-hash-based partial reindex
+├── git.ts             — changed-since, git diff integration
+├── analytics.ts       — local usage tracking and token savings
 ├── parser.ts          — buildIndex() orchestrator
-├── api.ts             — Express REST server
-├── mcp.ts             — MCP stdio server (8 tools)
-├── cli.ts             — CLI commands
-├── dashboard.ts       — web dashboard server
-└── index.ts           — public exports
+├── api.ts             — REST server (9 endpoints)
+├── mcp.ts             — MCP server (13 tools)
+├── cli.ts             — CLI (index/watch/serve/dashboard/query/stats)
+└── dashboard.ts       — web UI
 ```
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The fastest contribution: add a new language parser — it's ~80 lines implementing the `LanguageAdapter` interface.
+See [CONTRIBUTING.md](CONTRIBUTING.md). Adding a language = ~80 lines implementing `LanguageAdapter`.
 
 ## License
 

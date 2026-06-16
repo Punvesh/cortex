@@ -1,11 +1,21 @@
 import { glob } from "glob";
 import path from "path";
-import { parseFile, getGlobPattern } from "./parsers/index.js";
+import crypto from "crypto";
+import fs from "fs";
+import { parseFile as _parseFile, getGlobPattern } from "./parsers/index.js";
 import type { SCLIndex } from "./types.js";
 
 export { parseFile } from "./parsers/index.js";
 
-export async function buildIndex(root: string, onProgress?: (file: string, i: number, total: number) => void): Promise<SCLIndex> {
+function hashFile(filePath: string): string {
+  const content = fs.readFileSync(filePath);
+  return crypto.createHash("md5").update(content).digest("hex").slice(0, 8);
+}
+
+export async function buildIndex(
+  root: string,
+  onProgress?: (file: string, i: number, total: number) => void
+): Promise<SCLIndex> {
   const pattern = getGlobPattern();
   const files = await glob(pattern, {
     cwd: root,
@@ -16,6 +26,7 @@ export async function buildIndex(root: string, onProgress?: (file: string, i: nu
   const index: SCLIndex = {
     root,
     generatedAt: new Date().toISOString(),
+    fileHashes: {},
     functions: [],
     callSites: [],
     imports: [],
@@ -24,16 +35,18 @@ export async function buildIndex(root: string, onProgress?: (file: string, i: nu
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
-    onProgress?.(path.relative(root, file), i + 1, files.length);
+    const relPath = path.relative(root, file).replace(/\\/g, "/");
+    onProgress?.(relPath, i + 1, files.length);
     try {
-      const result = parseFile(file, root);
+      const result = _parseFile(file, root);
       if (!result) continue;
       index.functions.push(...result.functions);
       index.callSites.push(...result.callSites);
       index.imports.push(...result.imports);
       index.symbols.push(result.symbols);
-    } catch (err) {
-      // Skip unparseable files silently
+      index.fileHashes[relPath] = hashFile(file);
+    } catch {
+      // skip unparseable files
     }
   }
 
