@@ -1,0 +1,59 @@
+{
+  "repo": "vercel/next.js",
+  "indexedAt": "2026-06-16T16:50:57.611Z",
+  "indexStats": {
+    "files": 1913,
+    "functions": 13495,
+    "callSites": 42137,
+    "imports": 4526
+  },
+  "results": [
+    {
+      "task": "Find all callers of createContext",
+      "rawTokens": 102815,
+      "cortexTokens": 355,
+      "saved": 102460,
+      "pct": 99.7,
+      "ratio": 289.6
+    },
+    {
+      "task": "What does app-render.tsx import?",
+      "rawTokens": 90246,
+      "cortexTokens": 23,
+      "saved": 90223,
+      "pct": 100,
+      "ratio": 3923.7
+    },
+    {
+      "task": "Where is getServerSideProps defined?",
+      "rawTokens": 17326,
+      "cortexTokens": 20,
+      "saved": 17306,
+      "pct": 99.9,
+      "ratio": 866.3
+    },
+    {
+      "task": "Refactor impact of renderToHTML",
+      "rawTokens": 133980,
+      "cortexTokens": 34,
+      "saved": 133946,
+      "pct": 100,
+      "ratio": 3940.6
+    },
+    {
+      "task": "Full context for middleware.ts",
+      "rawTokens": 7511,
+      "cortexTokens": 43,
+      "saved": 7468,
+      "pct": 99.4,
+      "ratio": 174.7
+    }
+  ],
+  "summary": {
+    "totalRawTokens": 351878,
+    "totalCortexTokens": 475,
+    "totalSaved": 351403,
+    "avgReductionPct": 99.9,
+    "avgRatio": 740.8
+  }
+}
